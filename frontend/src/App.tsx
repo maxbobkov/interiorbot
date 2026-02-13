@@ -139,6 +139,7 @@ export default function App() {
   const [jobStatusText, setJobStatusText] = useState('');
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [sendingToChat, setSendingToChat] = useState(false);
+  const [savingToDevice, setSavingToDevice] = useState(false);
 
   const [viewport, setViewport] = useState({
     width: typeof window !== 'undefined' ? window.innerWidth : 390,
@@ -730,6 +731,58 @@ export default function App() {
     }
   };
 
+  const handleSaveToDevice = async () => {
+    if (!resultUrl) {
+      return;
+    }
+
+    setSavingToDevice(true);
+    setError('');
+
+    const absoluteResultUrl = toAbsoluteUrl(resultUrl);
+    const fallbackOpenImage = () => {
+      const tgOpenLink = window.Telegram?.WebApp?.openLink;
+      if (typeof tgOpenLink === 'function') {
+        tgOpenLink(absoluteResultUrl);
+      } else {
+        window.open(absoluteResultUrl, '_blank', 'noopener,noreferrer');
+      }
+      setInfo('Открыли изображение. Если файл не скачался автоматически, сохраните его через меню браузера.');
+    };
+
+    try {
+      const response = await fetch(absoluteResultUrl, { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('Failed to load generated image');
+      }
+
+      const blob = await response.blob();
+      if (blob.size < 1) {
+        throw new Error('Generated image is empty');
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        link.href = objectUrl;
+        link.download = `interior-result-${stamp}.png`;
+        link.rel = 'noopener noreferrer';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setInfo('Сохранение запущено. Проверьте загрузки телефона.');
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    } catch (_err) {
+      fallbackOpenImage();
+    } finally {
+      setSavingToDevice(false);
+    }
+  };
+
   const setScale = (nextScale: number) => {
     if (selectedSlotId === null) return;
     updatePlacement(selectedSlotId, (current) => ({
@@ -946,6 +999,9 @@ export default function App() {
           <div className="actions-row">
             <button type="button" onClick={startGeneration}>
               Regenerate
+            </button>
+            <button type="button" onClick={handleSaveToDevice} disabled={savingToDevice}>
+              {savingToDevice ? 'Сохраняем...' : 'Сохранить на телефон'}
             </button>
             <button type="button" onClick={handleSendToChat} disabled={sendingToChat}>
               {sendingToChat ? 'Отправляем...' : 'Send to chat'}
