@@ -6,6 +6,7 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -227,6 +228,27 @@ def _schedule_task(task: asyncio.Task[Any]) -> None:
     task.add_done_callback(_cleanup)
 
 
+def _normalize_generated_result_url(url: str) -> str:
+    value = url.strip()
+    if not value:
+        return value
+
+    parsed = urlparse(value)
+    if parsed.scheme.lower() != 'http' or not BANANA_BASE_URL:
+        return value
+
+    banana_base = urlparse(BANANA_BASE_URL)
+    if (
+        banana_base.scheme.lower() == 'https'
+        and parsed.hostname
+        and banana_base.hostname
+        and parsed.hostname.lower() == banana_base.hostname.lower()
+    ):
+        return urlunparse(parsed._replace(scheme='https'))
+
+    return value
+
+
 async def _run_generation_job(job_id: str, banana_request: BananaCreateRequest) -> None:
     client: SosanoBananaAPIClient | None = app.state.banana_client
     if client is None:
@@ -243,8 +265,18 @@ async def _run_generation_job(job_id: str, banana_request: BananaCreateRequest) 
             timeout=BANANA_TIMEOUT_SECONDS,
         )
 
-        if final_task.status == ApiStatus.COMPLETED and final_task.result_file_url:
-            db.set_job_status(job_id, status='done', result_url=final_task.result_file_url)
+        if final_task.status == ApiStatus.COMPLETED:
+            result_url = (final_task.result_file_url or '').strip()
+            if not result_url:
+                db.set_job_status(
+                    job_id,
+                    status='failed',
+                    error='Generation completed but result URL is missing',
+                )
+                return
+
+            normalized_url = _normalize_generated_result_url(result_url)
+            db.set_job_status(job_id, status='done', result_url=normalized_url)
             return
 
         if final_task.status == ApiStatus.MODERATED:

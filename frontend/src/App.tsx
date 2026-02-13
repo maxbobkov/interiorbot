@@ -54,6 +54,30 @@ const clamp = (value: number, min: number, max: number): number => Math.min(max,
 
 const toAbsoluteUrl = (url: string): string => new URL(url, window.location.origin).toString();
 
+function normalizeJobStatus(status: unknown): string {
+  if (typeof status !== 'string') {
+    return '';
+  }
+  return status.trim().toLowerCase();
+}
+
+function extractJobResultUrl(job: Record<string, unknown>): string | null {
+  const candidates = [
+    job.result_url,
+    job.result_file_url,
+    job.resultUrl,
+    job.resultFileUrl,
+  ];
+
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function createObjectSlot(slotId: number): ObjectSlot {
@@ -638,17 +662,26 @@ export default function App() {
     const loop = async () => {
       while (!cancelled) {
         try {
-          const job: JobResponse = await getJob(initData, jobId);
-          setJobStatusText(`Статус: ${job.status}`);
+          const job = (await getJob(initData, jobId)) as JobResponse & Record<string, unknown>;
+          const status = normalizeJobStatus(job.status);
+          const resolvedResultUrl = extractJobResultUrl(job);
 
-          if (job.status === 'done' && job.result_url) {
-            setResultUrl(job.result_url);
+          setJobStatusText(`Статус: ${status || 'unknown'}`);
+
+          if ((status === 'done' || status === 'completed') && resolvedResultUrl) {
+            setResultUrl(resolvedResultUrl);
             setMode('result');
             setInfo('Готово. Можно отправить результат в чат.');
             return;
           }
 
-          if (job.status === 'failed' || job.status === 'moderated') {
+          if (status === 'done' || status === 'completed') {
+            setMode('compose');
+            setError('Генерация завершилась, но ссылка на результат отсутствует.');
+            return;
+          }
+
+          if (status === 'failed' || status === 'moderated') {
             setMode('compose');
             setError(job.error || 'Generation failed');
             return;
@@ -895,7 +928,15 @@ export default function App() {
       {mode === 'result' && resultUrl ? (
         <section className="panel">
           <h2>3. Результат</h2>
-          <img src={toAbsoluteUrl(resultUrl)} className="result-image" alt="Generated interior" />
+          <img
+            src={toAbsoluteUrl(resultUrl)}
+            className="result-image"
+            alt="Generated interior"
+            referrerPolicy="no-referrer"
+            onError={() => {
+              setError('Не удалось загрузить изображение результата. Попробуйте Regenerate.');
+            }}
+          />
           <div className="actions-row">
             <button type="button" onClick={startGeneration}>
               Regenerate
