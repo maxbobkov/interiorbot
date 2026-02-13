@@ -8,6 +8,7 @@ services:
       - backend_data:/app/data
     networks:
       - app
+      - egress
 
   frontend:
     build: ./frontend
@@ -30,5 +31,6 @@ volumes:
 networks:
   app:
     internal: true
+  egress:
   traefik-public:
     external: true
