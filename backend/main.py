@@ -46,10 +46,38 @@ S3_OBJECT_PREFIX = os.environ.get('S3_OBJECT_PREFIX', 'tg-mini-app').strip().str
 
 PROMPTS: dict[str, str] = {
     'photorealistic_v1': (
-        'Create a photorealistic interior render based on the uploaded collage. '
-        'Keep object identities and layout positions consistent with the collage, '
-        'preserve plausible scale relationships, realistic shadows, and natural indoor lighting. '
-        'Do not add extra furniture that changes the composition.'
+        '**Type:** Photorealistic Interior Composite\n\n'
+        '**Source Inputs:**\n'
+        '1. Base empty interior photo = architectural foundation (keep geometry unchanged).\n'
+        '2. Collage layout reference = spatial placement guide.\n'
+        '3. Individual furniture photos = texture, material, and geometry reference.\n\n'
+        '**Scene Preservation:**\n'
+        '- Maintain original room architecture, wall positions, windows, flooring, and ceiling height.\n'
+        '- Keep original camera angle and perspective from the base image.\n\n'
+        '**Layout & Spatial Logic:**\n'
+        '- Position each furniture item strictly according to the collage reference.\n'
+        '- Maintain correct real-world scale and ergonomic proportions.\n'
+        '- Ensure proper grounding: all objects physically contact the floor plane.\n'
+        '- Respect spatial depth: foreground, midground, background separation.\n'
+        '- Avoid floating objects; enforce realistic weight distribution and contact shadows.\n\n'
+        '**Material & Texture Accuracy:**\n'
+        '- Preserve original upholstery fabric texture, wood grain direction, metal finishes, and color tones from individual product photos.\n'
+        '- Maintain high-frequency surface detail (stitching, seams, edges).\n\n'
+        '**Lighting Integration:**\n'
+        '- Match the base interior light direction and intensity.\n'
+        '- Generate physically accurate contact shadows under each object.\n'
+        '- Apply global illumination and soft bounce light from walls and floor.\n'
+        '- Natural daylight realism with subtle ambient occlusion.\n'
+        '- Volumetric soft window light.\n\n'
+        '**Camera & Technical Specs:**\n'
+        '- Shot on 35mm full-frame lens\n'
+        '- f/4 aperture\n'
+        '- ISO 100\n'
+        '- High dynamic range\n'
+        '- Sharp focus across furniture planes\n'
+        '- 8K photorealistic rendering\n\n'
+        '**Final Goal:**\n'
+        'Produce a seamless, indistinguishable-from-real interior photograph where all inserted furniture appears originally present in the space, with perfect perspective alignment, scale accuracy, and natural lighting physics.'
     )
 }
 
@@ -207,6 +235,132 @@ def _register_asset(
 
 def _invalid_image_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=f'Invalid image file: {exc}')
+
+
+def _is_http_url(value: str) -> bool:
+    return value.startswith('http://') or value.startswith('https://')
+
+
+def _asset_local_path(storage_key: str) -> Path:
+    return MEDIA_DIR / storage_key
+
+
+async def _publish_existing_asset_url(
+    request: Request,
+    *,
+    asset: dict[str, Any],
+    required: bool,
+    context: str,
+) -> str | None:
+    storage_key = str(asset.get('storage_key') or '').strip()
+    if storage_key:
+        local_path = _asset_local_path(storage_key)
+        if local_path.exists() and local_path.is_file():
+            try:
+                return await _publish_collage_url(request, storage_key, local_path)
+            except HTTPException:
+                if required:
+                    raise
+                logger.warning('Skipping %s: failed to publish asset %s', context, asset.get('id'))
+                return None
+
+    public_url = str(asset.get('public_url') or '').strip()
+    if _is_http_url(public_url):
+        return public_url
+
+    if storage_key:
+        rebuilt_url = _public_url_for_storage_key(request, storage_key)
+        if _is_http_url(rebuilt_url):
+            return rebuilt_url
+
+    if required:
+        raise HTTPException(status_code=500, detail=f'Cannot publish URL for {context}')
+
+    logger.warning('Skipping %s: no public URL for asset %s', context, asset.get('id'))
+    return None
+
+
+async def _build_generation_image_urls(
+    request: Request,
+    *,
+    user_id: str,
+    scene: dict[str, Any],
+    collage_url: str,
+) -> tuple[list[str], list[str]]:
+    background_asset_id = str(scene.get('background_asset_id') or '').strip()
+    background = db.get_asset(background_asset_id, user_id) if background_asset_id else None
+    if background is None:
+        raise HTTPException(status_code=404, detail='Background asset not found')
+    if background.get('kind') != 'background':
+        raise HTTPException(status_code=400, detail='Scene background asset is invalid')
+
+    background_url = await _publish_existing_asset_url(
+        request,
+        asset=background,
+        required=True,
+        context='background',
+    )
+    assert background_url is not None  # required=True guarantees this
+
+    furniture_urls: list[str] = []
+    scene_objects = scene.get('objects') or []
+    for index, item in enumerate(scene_objects):
+        if not isinstance(item, dict):
+            logger.warning('Skipping object at index=%s: invalid scene object payload', index)
+            continue
+
+        cutout_asset_id = str(item.get('asset_id') or '').strip()
+        if not cutout_asset_id:
+            logger.warning('Skipping object at index=%s: empty asset_id', index)
+            continue
+
+        cutout_asset = db.get_asset(cutout_asset_id, user_id)
+        if cutout_asset is None:
+            logger.warning('Skipping object at index=%s: cutout asset %s not found', index, cutout_asset_id)
+            continue
+        if cutout_asset.get('kind') != 'object_cutout':
+            logger.warning(
+                'Skipping object at index=%s: asset %s has unexpected kind %s',
+                index,
+                cutout_asset_id,
+                cutout_asset.get('kind'),
+            )
+            continue
+
+        source_asset_id = str(cutout_asset.get('source_asset_id') or '').strip()
+        if not source_asset_id:
+            logger.warning('Skipping object at index=%s: cutout asset %s has no source_asset_id', index, cutout_asset_id)
+            continue
+
+        source_asset = db.get_asset(source_asset_id, user_id)
+        if source_asset is None:
+            logger.warning(
+                'Skipping object at index=%s: source asset %s not found',
+                index,
+                source_asset_id,
+            )
+            continue
+        if source_asset.get('kind') != 'object_source':
+            logger.warning(
+                'Skipping object at index=%s: source asset %s has unexpected kind %s',
+                index,
+                source_asset_id,
+                source_asset.get('kind'),
+            )
+            continue
+
+        source_url = await _publish_existing_asset_url(
+            request,
+            asset=source_asset,
+            required=False,
+            context=f'object source #{index + 1}',
+        )
+        if source_url:
+            furniture_urls.append(source_url)
+
+    image_urls = [background_url, collage_url, *furniture_urls]
+    image_kinds = ['background', 'collage', *[f'object_source_{i + 1}' for i in range(len(furniture_urls))]]
+    return image_urls, image_kinds
 
 
 def _normalize_object_label(value: str | None) -> str | None:
@@ -448,11 +602,24 @@ async def generate(
     )
 
     collage_url = await _publish_collage_url(request, collage_key, collage_path)
+    image_urls, image_kinds = await _build_generation_image_urls(
+        request,
+        user_id=user_id,
+        scene=scene,
+        collage_url=collage_url,
+    )
+    logger.info(
+        'Prepared generation image order for scene_id=%s: total=%s kinds=%s',
+        scene_id,
+        len(image_urls),
+        ','.join(f'{idx + 1}:{kind}' for idx, kind in enumerate(image_kinds)),
+    )
+
     prompt = PROMPTS.get(prompt_mode, PROMPTS['photorealistic_v1'])
 
     banana_request = BananaCreateRequest(
         prompt=prompt,
-        image_urls=[collage_url],
+        image_urls=image_urls,
         model=(model or BANANA_DEFAULT_MODEL),
         aspect_ratio='auto',
         p=p,
