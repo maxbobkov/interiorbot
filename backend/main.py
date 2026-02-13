@@ -26,6 +26,7 @@ from models import (
     SendToChatResponse,
     UploadObjectResponse,
 )
+from s3_client import S3Client
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,6 @@ BANANA_BEARER_TOKEN = os.environ.get('BANANA_BEARER_TOKEN', '').strip()
 BANANA_DEFAULT_MODEL = os.environ.get('BANANA_MODEL', 'nano-banana-pro-2k').strip()
 BANANA_TIMEOUT_SECONDS = float(os.environ.get('BANANA_TIMEOUT_SECONDS', '300'))
 
-S3_BUCKET = os.environ.get('S3_BUCKET', '').strip()
-S3_ENDPOINT_URL = os.environ.get('S3_ENDPOINT_URL', '').strip() or None
-S3_REGION = os.environ.get('S3_REGION', '').strip() or None
-S3_ACCESS_KEY_ID = os.environ.get('S3_ACCESS_KEY_ID', '').strip() or None
-S3_SECRET_ACCESS_KEY = os.environ.get('S3_SECRET_ACCESS_KEY', '').strip() or None
-S3_PUBLIC_BASE_URL = os.environ.get('S3_PUBLIC_BASE_URL', '').strip().rstrip('/')
 S3_OBJECT_PREFIX = os.environ.get('S3_OBJECT_PREFIX', 'tg-mini-app').strip().strip('/')
 
 PROMPTS: dict[str, str] = {
@@ -79,12 +74,17 @@ async def startup() -> None:
 
     app.state.tasks = set()
     app.state.banana_client = None
+    app.state.s3_client = None
 
     if BANANA_BASE_URL and BANANA_BEARER_TOKEN:
         app.state.banana_client = SosanoBananaAPIClient(
             base_url=BANANA_BASE_URL,
             bearer_token=BANANA_BEARER_TOKEN,
         )
+
+    s3_client = S3Client()
+    if s3_client.is_configured():
+        app.state.s3_client = s3_client
 
 
 @app.on_event('shutdown')
@@ -154,7 +154,8 @@ async def _read_image_file(upload: UploadFile) -> bytes:
 
 
 async def _publish_collage_url(request: Request, storage_key: str, local_path: Path) -> str:
-    if not S3_BUCKET:
+    s3_client: S3Client | None = getattr(app.state, 's3_client', None)
+    if s3_client is None:
         url = _public_url_for_storage_key(request, storage_key)
         if not url.startswith('http://') and not url.startswith('https://'):
             raise HTTPException(
@@ -163,41 +164,13 @@ async def _publish_collage_url(request: Request, storage_key: str, local_path: P
             )
         return url
 
-    try:
-        import boto3
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail='boto3 is required for S3 publishing') from exc
-
-    session = boto3.session.Session()
-    client = session.client(
-        's3',
-        endpoint_url=S3_ENDPOINT_URL,
-        region_name=S3_REGION,
-        aws_access_key_id=S3_ACCESS_KEY_ID,
-        aws_secret_access_key=S3_SECRET_ACCESS_KEY,
-    )
-
     bucket_key_prefix = f'{S3_OBJECT_PREFIX}/' if S3_OBJECT_PREFIX else ''
     object_key = f'{bucket_key_prefix}{storage_key}'
 
-    extra: dict[str, Any] = {'ContentType': 'image/png'}
-    if not S3_PUBLIC_BASE_URL:
-        extra['ACL'] = 'public-read'
-
-    with local_path.open('rb') as fp:
-        client.put_object(Bucket=S3_BUCKET, Key=object_key, Body=fp, **extra)
-
-    if S3_PUBLIC_BASE_URL:
-        return f'{S3_PUBLIC_BASE_URL}/{object_key}'
-
-    if S3_ENDPOINT_URL:
-        endpoint = S3_ENDPOINT_URL.rstrip('/')
-        return f'{endpoint}/{S3_BUCKET}/{object_key}'
-
-    if S3_REGION:
-        return f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{object_key}'
-
-    return f'https://{S3_BUCKET}.s3.amazonaws.com/{object_key}'
+    try:
+        return await s3_client.upload_file(local_path, key=object_key)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 def _register_asset(
