@@ -78,6 +78,12 @@ function extractJobResultUrl(job: Record<string, unknown>): string | null {
   return null;
 }
 
+function buildJobResultProxyUrl(jobId: string, initData: string): string {
+  const encodedJobId = encodeURIComponent(jobId);
+  const encodedInitData = encodeURIComponent(initData);
+  return `/api/jobs/${encodedJobId}/result?init_data=${encodedInitData}`;
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function createObjectSlot(slotId: number): ObjectSlot {
@@ -669,7 +675,7 @@ export default function App() {
           setJobStatusText(`Статус: ${status || 'unknown'}`);
 
           if ((status === 'done' || status === 'completed') && resolvedResultUrl) {
-            setResultUrl(resolvedResultUrl);
+            setResultUrl(buildJobResultProxyUrl(jobId, initData));
             setMode('result');
             setInfo('Готово. Можно отправить результат в чат.');
             return;

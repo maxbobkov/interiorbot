@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 import uuid
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -249,6 +250,35 @@ def _normalize_generated_result_url(url: str) -> str:
     return value
 
 
+async def _fetch_remote_image(url: str) -> tuple[bytes, str]:
+    timeout = aiohttp.ClientTimeout(total=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status >= 400:
+                raise HTTPException(status_code=502, detail='Failed to load generated image')
+            data = await response.read()
+            if not data:
+                raise HTTPException(status_code=502, detail='Generated image is empty')
+            content_type = response.headers.get('content-type', 'application/octet-stream').split(';')[0].strip()
+            return data, content_type
+
+
+def _read_local_media_image(media_url_path: str) -> tuple[bytes, str]:
+    storage_key = media_url_path[len('/media/'):]
+    candidate = (MEDIA_DIR / storage_key).resolve()
+    media_root = MEDIA_DIR.resolve()
+    if not str(candidate).startswith(str(media_root)):
+        raise HTTPException(status_code=400, detail='Invalid media path')
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail='Generated image file not found')
+
+    data = candidate.read_bytes()
+    if not data:
+        raise HTTPException(status_code=404, detail='Generated image file is empty')
+    media_type = mimetypes.guess_type(str(candidate))[0] or 'application/octet-stream'
+    return data, media_type
+
+
 async def _run_generation_job(job_id: str, banana_request: BananaCreateRequest) -> None:
     client: SosanoBananaAPIClient | None = app.state.banana_client
     if client is None:
@@ -448,6 +478,37 @@ def get_job(job_id: str, init_data: str = Query(...)) -> JobResponse:
         banana_uid=job['banana_uid'],
         result_url=job['result_url'],
         error=job['error'],
+    )
+
+
+@app.get('/api/jobs/{job_id}/result')
+async def get_job_result(job_id: str, init_data: str = Query(...)) -> Response:
+    user_id = _user_id_from_init_data(init_data)
+    job = db.get_job(job_id, user_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail='Job not found')
+
+    if job.get('status') != 'done' or not job.get('result_url'):
+        raise HTTPException(status_code=400, detail='Job result is not ready')
+
+    result_url = str(job['result_url']).strip()
+    if not result_url:
+        raise HTTPException(status_code=400, detail='Job result URL is empty')
+
+    if result_url.startswith('/media/'):
+        data, content_type = _read_local_media_image(result_url)
+    else:
+        parsed = urlparse(result_url)
+        if parsed.scheme not in ('http', 'https'):
+            raise HTTPException(status_code=400, detail='Unsupported result URL format')
+        data, content_type = await _fetch_remote_image(result_url)
+
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={
+            'Cache-Control': 'private, max-age=300',
+        },
     )
 
 
