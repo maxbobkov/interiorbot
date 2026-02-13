@@ -1,0 +1,34 @@
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      - DB_PATH=/app/data/app.db
+    volumes:
+      - backend_data:/app/data
+    networks:
+      - app
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    networks:
+      - app
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tma-counter.rule=Host(`app.macro-scope.ru`)"
+      - "traefik.http.routers.tma-counter.entrypoints=websecure"
+      - "traefik.http.routers.tma-counter.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.tma-counter.middlewares=secure-headers"
+      - "traefik.http.services.tma-counter.loadbalancer.server.port=80"
+
+volumes:
+  backend_data:
+
+networks:
+  app:
+    internal: true
+  traefik-public:
+    external: true
